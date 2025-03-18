@@ -5,9 +5,13 @@ from math import sqrt
 from math import log
 import utils
 
-from utils import make_functional, load_weights
+from utils import load_weights
 
-from variables_and_paths import OPENCLIP_CACHEDIR, CACHEDIR
+from variables_and_paths import OPENCLIP_CACHEDIR
+
+from repair_and_shift_utils import collect_stats
+
+
 
 
 class ImageEncoder(torch.nn.Module):
@@ -235,131 +239,10 @@ class ModelWrapper(torch.nn.Module):
         features = self.model(images)
         return features
 
-class TW_AdaMerging(torch.nn.Module):
-    def __init__(self, paramslist, model, names, args):
-        super(TW_AdaMerging, self).__init__()
-        self.paramslist = paramslist
-        self.model = model
-        self.names = names
-        self.pretrain_lambdas = torch.ones(1, 1)
-        self.args = args
-        prior = 0.3
-        rlambdas = torch.ones(1, len(paramslist)-1) * prior  # (1 * tasks)
-        self.lambdas_raw = torch.nn.Parameter(rlambdas)
-
-        # self.classifier = []
-        # for dataset_name in exam_datasets:
-        #     classification_head = get_classification_head(args, dataset_name)
-        #     layer_name = 'classifier_{}'.format(dataset_name)
-        #     self.add_module(layer_name, classification_head.to(args.device))
-        #     self.classifier.append(layer_name)
-
-    def lambdas(self):
-        task_lambdas = torch.clamp(self.lambdas_raw, min=0.0, max=1.0)
-        lambdass = torch.cat((self.pretrain_lambdas, task_lambdas), 1)
-        return lambdass
-
-    def collect_trainable_params(self):
-        return [self.lambdas_raw]
-
-    # def get_classification_head(self, dataset_name):
-    #     layer_name = 'classifier_{}'.format(dataset_name)
-    #     classification_head = getattr(self, layer_name)
-    #     return classification_head
-
-    def get_image_encoder(self):
-        alph = self.lambdas()
-        params = tuple(sum(tuple(pi * lambdasi for pi, lambdasi in zip(p, alph[0].cpu()))) for j, p in enumerate(zip(*self.paramslist)))
-        params = tuple(p.cuda(0) for p in params)
-        load_weights(self.model, self.names, params)
-        return self.model
-    
-    def set_weights(self, alph):
-        params = tuple(sum(tuple(pi * lambdasi for pi, lambdasi in zip(p, alph[0].cpu()))) for j, p in enumerate(zip(*self.paramslist)))
-        params = tuple(p.cuda(0) for p in params)
-        load_weights(self.model, self.names, params)
-        return self.model
-
-    def forward(self, inp, dataset_name):
-        alph = self.lambdas()
-        params = tuple(sum(tuple(pi * lambdasi for pi, lambdasi in zip(p, alph[0].cpu()))) for j, p in enumerate(zip(*self.paramslist)))
-
-        params = tuple(p.cuda(0) for p in params)
-        load_weights(self.model, self.names, params)
-        feature = self.model(inp)
-
-        layer_name = 'classifier_{}'.format(dataset_name)
-        classification_head = getattr(self, layer_name)
-        out = classification_head(feature)
-
-        return out
-    
-
-class LW_AdaMerging(torch.nn.Module):
-    def __init__(self, paramslist, model, names, exam_datasets):
-        super(LW_AdaMerging, self).__init__()
-        self.paramslist = paramslist
-        self.model = model
-        self.names = names
-        self.pretrain_lambdas = torch.ones(len(paramslist[0]), 1)
-        prior = 0.3
-        rlambdas = torch.ones(len(paramslist[0]), len(paramslist)-1) * prior  # (1 * tasks)
-        self.lambdas_raw = torch.nn.Parameter(rlambdas)
-
-        # self.classifier = []
-        # for dataset_name in exam_datasets:
-        #     classification_head = get_classification_head(args, dataset_name)
-        #     layer_name = 'classifier_{}'.format(dataset_name)
-        #     self.add_module(layer_name, classification_head.to(args.device))
-        #     self.classifier.append(layer_name)
-
-    def lambdas(self):
-        task_lambdas = torch.clamp(self.lambdas_raw, min=0.0, max=1.0)
-        lambdass = torch.cat((self.pretrain_lambdas, task_lambdas), 1)
-        return lambdass
-
-    def collect_trainable_params(self):
-        return [self.lambdas_raw]
-
-    # def get_classification_head(self, dataset_name):
-    #     layer_name = 'classifier_{}'.format(dataset_name)
-    #     classification_head = getattr(self, layer_name)
-    #     return classification_head
-
-    def get_image_encoder(self):
-        alph = self.lambdas()
-        params = tuple(sum(tuple(pi * lambdasi for pi, lambdasi in zip(p, alph[j].cpu()))) for j, p in enumerate(zip(*self.paramslist)))
-        params = tuple(p.cuda(0) for p in params)
-        load_weights(self.model, self.names, params)
-        return self.model
-    
-
-    def set_weights(self, alph):
-        params = tuple(sum(tuple(pi * lambdasi for pi, lambdasi in zip(p, alph[j].cpu()))) for j, p in enumerate(zip(*self.paramslist)))
-        params = tuple(p.cuda(0) for p in params)
-        load_weights(self.model, self.names, params)
-        return self.model
-
-
-    def forward(self, inp, dataset_name):
-        alph = self.lambdas()
-        params = tuple(sum(tuple(pi * lambdasi for pi, lambdasi in zip(p, alph[j].cpu()))) for j, p in enumerate(zip(*self.paramslist)))
-
-        params = tuple(p.cuda(0) for p in params)
-        load_weights(self.model, self.names, params)
-        feature = self.model(inp)
-
-        layer_name = 'classifier_{}'.format(dataset_name)
-        classification_head = getattr(self, layer_name)
-        out = classification_head(feature)
-        return out
-
-
-
 class AdaMerging(torch.nn.Module):
     def __init__(self, paramslist, model, names, mode="task-wise", prior=0.3):
         """
-        Unified class for TW_AdaMerging (Task-wise) and LW_AdaMerging (Layer-wise).
+        Unified class for Task-wise (TW) and Layer-wise (LW) AdaMerging.
 
         Args:
             paramslist (list): List of model parameters from different tasks.
@@ -376,39 +259,34 @@ class AdaMerging(torch.nn.Module):
 
         if mode == "task-wise":
             self.pretrain_lambdas = torch.ones(1, 1)
-            rlambdas = torch.ones(1, len(paramslist) - 1) * prior  # (1 × tasks)
+            rlambdas = torch.ones(1, len(paramslist) - 1) * prior
         elif mode == "layer-wise":
             self.pretrain_lambdas = torch.ones(len(paramslist[0]), 1)
-            rlambdas = torch.ones(len(paramslist[0]), len(paramslist) - 1) * prior  # (layers × tasks)
+            rlambdas = torch.ones(len(paramslist[0]), len(paramslist) - 1) * prior
         else:
             raise ValueError("Mode must be 'task-wise' or 'layer-wise'")
 
         self.lambdas_raw = torch.nn.Parameter(rlambdas)
 
     def lambdas(self):
-        """Returns clamped lambda values."""
         task_lambdas = torch.clamp(self.lambdas_raw, min=0.0, max=1.0)
         return torch.cat((self.pretrain_lambdas, task_lambdas), 1)
 
     def collect_trainable_params(self):
-        """Returns the parameters that can be trained."""
         return [self.lambdas_raw]
 
     def get_image_encoder(self):
-        """Computes and loads merged parameters into the model."""
         alph = self.lambdas()
         params = self.compute_merged_params(alph)
         load_weights(self.model, self.names, params)
         return self.model
 
     def set_weights(self, alph):
-        """Manually sets the merged weights using a given lambda."""
         params = self.compute_merged_params(alph)
         load_weights(self.model, self.names, params)
         return self.model
 
     def compute_merged_params(self, alph):
-        """Computes the merged parameters based on the current lambda values."""
         if self.mode == "task-wise":
             params = tuple(
                 sum(pi * lambdasi for pi, lambdasi in zip(p, alph[0].cpu()))
@@ -422,7 +300,6 @@ class AdaMerging(torch.nn.Module):
         return tuple(p.cuda(0) for p in params)
 
     def forward(self, inp, dataset_name):
-        """Forward pass with merged weights and classification head."""
         alph = self.lambdas()
         params = self.compute_merged_params(alph)
         load_weights(self.model, self.names, params)
@@ -431,3 +308,57 @@ class AdaMerging(torch.nn.Module):
         layer_name = f'classifier_{dataset_name}'
         classification_head = getattr(self, layer_name)
         return classification_head(feature)
+
+class ShiftWrapper(torch.nn.Module):
+    def __init__(self, finetuned_encoder, merged_encoder, classification_head, batch_shift=True, dataset=None, args=None):
+        super().__init__()
+        self.finetuned_encoder = finetuned_encoder
+        self.merged_encoder = merged_encoder
+        self.classification_head = classification_head
+        self.batch_shift = batch_shift
+        self.args = args
+
+        if not self.batch_shift:
+            assert dataset is not None
+            self.stats = collect_stats(self.finetuned_encoder, self.merged_encoder, dataset, args)
+
+        if self.merged_encoder is not None:
+            self.train_preprocess = self.merged_encoder.train_preprocess
+            self.val_preprocess = self.merged_encoder.val_preprocess
+
+    def freeze_head(self):
+        self.classification_head.weight.requires_grad_(False)
+        self.classification_head.bias.requires_grad_(False)
+
+    def unfreeze_head(self):
+        self.classification_head.weight.requires_grad_(True)
+        self.classification_head.bias.requires_grad_(True)
+
+    def freeze_encoder(self):
+        for param in self.merged_encoder.parameters():
+            param.requires_grad = False
+
+    def forward(self, inputs):
+        if self.batch_shift:
+            ft_features = self.finetuned_encoder(inputs)
+            features = self.merged_encoder(inputs)
+            features = (features - features.mean(dim=0)) / features.var(dim=0) * \
+                      ft_features.var(dim=0) + ft_features.mean(dim=0)
+        else:
+            features = self.merged_encoder(inputs)
+            features = (features - self.stats["merged_mean"]) / self.stats["merged_var"] * \
+                      self.stats["var"] + self.stats["mean"]
+        
+        return self.classification_head(features)
+
+    def __call__(self, inputs):
+        return self.forward(inputs)
+
+    def save(self, filename):
+        print(f"Saving image classifier to {filename}")
+        utils.torch_save(self, filename)
+
+    @classmethod
+    def load(cls, filename):
+        print(f"Loading image classifier from {filename}")
+        return utils.torch_load(filename)
